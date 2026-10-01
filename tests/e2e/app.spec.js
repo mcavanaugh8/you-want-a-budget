@@ -108,3 +108,109 @@ test('sample budget displays a complete, clearly labeled monthly plan', async ({
   ).toHaveValue('500.00');
   await page.screenshot({ path: '/tmp/ywab-desktop.png', fullPage: true });
 });
+
+test('groups drag, move with the keyboard, and delete safely on mobile', async ({ page }) => {
+  const created = await page.request.post('/api/budgets', {
+    data: { name: 'Group controls', demo: true },
+  });
+  const data = await created.json();
+  await page.goto('/');
+  await page.locator('#budget-select').selectOption(data.budget.id);
+  const first = data.groups[0],
+    second = data.groups[1],
+    last = data.groups.at(-1);
+  const groupIds = () =>
+    page.locator('.group-row').evaluateAll((rows) => rows.map((r) => r.dataset.groupId));
+  const handle = page.getByRole('button', { name: `Reorder ${first.name}`, exact: true });
+  const destination = page.locator(`[data-group-id="${last.id}"]`);
+  for (const group of data.groups)
+    await page.locator(`[data-group-id="${group.id}"] .group-collapse`).click();
+  await handle.dragTo(destination, { targetPosition: { x: 40, y: 30 } });
+  await expect.poll(async () => (await groupIds()).at(-1)).toBe(first.id);
+  await handle.focus();
+  await handle.press('ArrowUp');
+  await expect.poll(async () => (await groupIds()).at(-2)).toBe(first.id);
+  await page.reload();
+  await expect.poll(async () => (await groupIds()).at(-2)).toBe(first.id);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.getByRole('button', { name: `Options for ${first.name}`, exact: true }).click();
+  await page.getByRole('button', { name: 'Move up', exact: true }).click();
+  await expect(
+    page.getByText(`Position ${data.groups.length - 2} of ${data.groups.length}`, { exact: true }),
+  ).toBeVisible();
+  await page.getByRole('button', { name: 'Delete group', exact: true }).click();
+  await page.getByLabel('Move categories to').selectOption(second.id);
+  await page.getByRole('button', { name: 'Delete group', exact: true }).click();
+  await expect(
+    page.getByRole('button', { name: `Reorder ${first.name}`, exact: true }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole('textbox', { name: 'Assigned to Groceries', exact: true }),
+  ).toHaveValue('500.00');
+  const after = await (await page.request.get('/api/budgets/' + data.budget.id)).json();
+  expect(after.categories.find((c) => c.name === 'Groceries').groupId).toBe(second.id);
+  expect(after.transactions).toEqual(data.transactions);
+  expect(after.assignments).toEqual(data.assignments);
+  await page.reload();
+  await expect(
+    page.getByRole('button', { name: `Reorder ${first.name}`, exact: true }),
+  ).toHaveCount(0);
+});
+
+test('credit card payment flag hides categories and links imported sides without duplicates', async ({
+  page,
+}) => {
+  const data = await (
+    await page.request.post('/api/budgets', { data: { name: 'Card payment flow', demo: true } })
+  ).json();
+  const cash = data.accounts.find((a) => a.type === 'checking'),
+    card = data.accounts.find((a) => a.type === 'credit');
+  for (const row of [
+    { accountId: cash.id, amount: -5000, payee: 'Imported card autopay' },
+    { accountId: card.id, amount: 5000, payee: 'Imported payment received' },
+  ]) {
+    await page.request.post('/api/budgets/' + data.budget.id + '/transactions', {
+      data: { ...row, date: today(), cleared: true },
+    });
+  }
+  await page.goto('/');
+  await page.locator('#budget-select').selectOption(data.budget.id);
+  await page.getByRole('button', { name: 'Transactions', exact: true }).click();
+  await page.getByRole('button', { name: 'Edit Imported card autopay', exact: true }).click();
+  await page
+    .getByRole('checkbox', { name: 'Credit card payment (no category)', exact: true })
+    .check();
+  await expect(page.getByLabel('Category', { exact: true })).toHaveCount(0);
+  await expect(page.getByLabel('Paid to credit card')).toHaveValue(card.id);
+  const match = page.getByLabel('Matching transaction in the other account');
+  await expect(match).not.toHaveValue('');
+  await page.getByRole('button', { name: 'Save transaction', exact: true }).click();
+  const cashRow = page
+    .getByRole('row')
+    .filter({ has: page.getByText('Imported card autopay', { exact: true }) });
+  await expect(cashRow).toContainText('Credit card payment');
+  let saved = await (await page.request.get('/api/budgets/' + data.budget.id)).json();
+  expect(saved.transactions.length).toBe(data.transactions.length + 2);
+  expect(saved.transactions.filter((t) => t.transferId).length).toBe(2);
+  await page.getByRole('combobox', { name: 'Filter transactions' }).selectOption('uncategorized');
+  await expect(page.getByText('Imported card autopay', { exact: true })).toHaveCount(0);
+  await page.getByRole('combobox', { name: 'Filter transactions' }).selectOption('all');
+  await page.getByRole('button', { name: 'Add transaction', exact: true }).click();
+  await page
+    .getByRole('checkbox', { name: 'Credit card payment (no category)', exact: true })
+    .check();
+  await page.getByLabel('Amount', { exact: true }).fill('10.00');
+  await page
+    .getByRole('dialog')
+    .getByRole('button', { name: 'Add transaction', exact: true })
+    .click();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  saved = await (await page.request.get('/api/budgets/' + data.budget.id)).json();
+  expect(saved.transactions.length).toBe(data.transactions.length + 4);
+  expect(saved.transactions.filter((t) => t.transferId && !t.categoryId).length).toBe(4);
+  await page.reload();
+  await page.getByRole('button', { name: 'Transactions', exact: true }).click();
+  await expect(
+    page.locator('.category-badge').filter({ hasText: 'Credit card payment' }),
+  ).toHaveCount(4);
+});

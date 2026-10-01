@@ -142,6 +142,78 @@ function createTransfer(db, data, input) {
     insertTx(db, t);
   }
 }
+function saveCardPayment(db, data, input, old = null) {
+  const source = validateTx(data, { ...input, categoryId: null, id: old?.id });
+  const account = data.accounts.find((a) => a.id === source.accountId);
+  const other = data.accounts.find((a) => a.id === input.paymentAccountId);
+  if (
+    !other ||
+    other.id === account.id ||
+    (account.type === 'credit') === (other.type === 'credit')
+  )
+    fail('Choose one cash account and one credit card account for this payment.');
+  if (
+    (account.type === 'credit' && source.amount < 0) ||
+    (account.type !== 'credit' && source.amount > 0)
+  )
+    fail('A card payment must leave a cash account and enter a credit card account.');
+  const matching = input.matchingTransactionId
+    ? data.transactions.find((t) => t.id === input.matchingTransactionId)
+    : null;
+  if (
+    input.matchingTransactionId &&
+    (!matching ||
+      matching.id === old?.id ||
+      matching.transferId ||
+      matching.accountId !== other.id ||
+      matching.amount !== -source.amount ||
+      matching.date !== source.date)
+  )
+    fail(
+      'The matching payment must be an unlinked transaction in the other account with the same date and opposite amount.',
+    );
+  const peer =
+    matching ||
+    validateTx(data, {
+      accountId: other.id,
+      date: source.date,
+      payee: `Credit card payment: ${account.name}`,
+      amount: -source.amount,
+      memo: source.memo,
+      cleared: false,
+    });
+  const transferId = id();
+  atomic(db, () => {
+    if (old) {
+      const importKey =
+        old.accountId === source.accountId &&
+        old.date === source.date &&
+        old.amount === source.amount &&
+        old.payee === source.payee
+          ? old.importKey
+          : null;
+      db.prepare(
+        'UPDATE transactions SET accountId=?,date=?,payee=?,categoryId=NULL,amount=?,memo=?,cleared=?,transferId=?,importKey=? WHERE id=? AND budgetId=?',
+      ).run(
+        source.accountId,
+        source.date,
+        source.payee,
+        source.amount,
+        source.memo,
+        source.cleared,
+        transferId,
+        importKey,
+        old.id,
+        data.budget.id,
+      );
+    } else insertTx(db, { ...source, transferId });
+    if (matching)
+      db.prepare(
+        'UPDATE transactions SET categoryId=NULL,transferId=? WHERE id=? AND budgetId=?',
+      ).run(transferId, matching.id, data.budget.id);
+    else insertTx(db, { ...peer, transferId });
+  });
+}
 export function createApp(db) {
   const app = express();
   app.disable('x-powered-by');
@@ -262,8 +334,66 @@ export function createApp(db) {
     res.json({ ok: true });
   });
   app.post('/api/budgets/:id/groups', (req, res) => {
-    group(db, req.params.id, req.body.name, req.data.groups.length);
+    const position = Math.max(-1, ...req.data.groups.map((g) => g.position)) + 1;
+    group(db, req.params.id, req.body.name, position);
     res.status(201).json({ ok: true });
+  });
+  app.put('/api/budgets/:id/groups/order', (req, res) => {
+    const ids = req.body.groupIds;
+    if (
+      !Array.isArray(ids) ||
+      ids.length !== req.data.groups.length ||
+      new Set(ids).size !== ids.length ||
+      ids.some((id) => !req.data.groups.some((g) => g.id === id))
+    )
+      fail(
+        'The order must contain every group in this budget exactly once. Refresh and try again.',
+      );
+    atomic(db, () => {
+      const update = db.prepare('UPDATE groups SET position=? WHERE id=? AND budgetId=?');
+      ids.forEach((id, position) => update.run(position, id, req.params.id));
+    });
+    res.json({ ok: true });
+  });
+  app.delete('/api/budgets/:id/groups/:groupId', (req, res) => {
+    const source = req.data.groups.find((g) => g.id === req.params.groupId);
+    if (!source) fail('Group not found.', 404);
+    const categories = req.data.categories.filter((c) => c.groupId === source.id);
+    const target = req.body?.targetGroupId;
+    const replacementName = req.body?.newGroupName;
+    if (
+      categories.length &&
+      !replacementName &&
+      !req.data.groups.some((g) => g.id === target && g.id !== source.id)
+    )
+      fail('Choose another group for these categories, or name a new group.');
+    atomic(db, () => {
+      if (categories.length) {
+        const destination = replacementName
+          ? group(
+              db,
+              req.params.id,
+              replacementName,
+              Math.max(...req.data.groups.map((g) => g.position)) + 1,
+            )
+          : target;
+        let position = Math.max(
+          -1,
+          ...req.data.categories.filter((c) => c.groupId === destination).map((c) => c.position),
+        );
+        const move = db.prepare(
+          'UPDATE categories SET groupId=?,position=? WHERE id=? AND budgetId=?',
+        );
+        for (const c of categories) move.run(destination, ++position, c.id, req.params.id);
+      }
+      db.prepare('DELETE FROM groups WHERE id=? AND budgetId=?').run(source.id, req.params.id);
+      const remaining = db
+        .prepare('SELECT id FROM groups WHERE budgetId=? ORDER BY position,rowid')
+        .all(req.params.id);
+      const update = db.prepare('UPDATE groups SET position=? WHERE id=?');
+      remaining.forEach((g, position) => update.run(position, g.id));
+    });
+    res.json({ ok: true });
   });
   app.post('/api/budgets/:id/categories', (req, res) => {
     if (!req.data.groups.some((g) => g.id === req.body.groupId)) fail('Group not found.');
@@ -341,7 +471,8 @@ export function createApp(db) {
     res.json({ ok: true });
   });
   app.post('/api/budgets/:id/transactions', (req, res) => {
-    insertTx(db, validateTx(req.data, req.body));
+    if (req.body.isCardPayment) saveCardPayment(db, req.data, req.body);
+    else insertTx(db, validateTx(req.data, req.body));
     res.status(201).json({ ok: true });
   });
   app.patch('/api/budgets/:id/transactions/:txId', (req, res) => {
@@ -355,6 +486,10 @@ export function createApp(db) {
       return res.json({ ok: true });
     }
     if (old.transferId) fail('Delete and recreate a transfer to change it.');
+    if (req.body.isCardPayment) {
+      saveCardPayment(db, req.data, req.body, old);
+      return res.json({ ok: true });
+    }
     const t = validateTx(req.data, { ...req.body, id: old.id });
     db.prepare(
       'UPDATE transactions SET accountId=?,date=?,payee=?,categoryId=?,amount=?,memo=?,cleared=?,importKey=NULL WHERE id=?',

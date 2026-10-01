@@ -12,7 +12,8 @@ export default defineConfig({
     trace: 'retain-on-failure',
   },
   webServer: {
-    command: 'BUDGET_DATA_DIR=$(mktemp -d /tmp/ywab-e2e.XXXXXX) PORT=3101 npm run dev',
+    command:
+      'npm run build && BUDGET_DATA_DIR=$(mktemp -d /tmp/ywab-e2e.XXXXXX) PORT=3101 npm start',
     url: 'http://127.0.0.1:3101',
     reuseExistingServer: false,
     timeout: 30000,

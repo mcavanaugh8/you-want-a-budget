@@ -34,6 +34,9 @@ import {
   Target,
   TrendingUp,
   CalendarDays,
+  GripVertical,
+  ArrowUp,
+  ArrowDown,
 } from 'lucide-react';
 import { calculateBudget } from '../shared/budget.js';
 import { cents, money, today, nextMonth, validMonth } from '../shared/money.js';
@@ -43,6 +46,16 @@ const monthLabel = (m) =>
   new Date(m + '-02T12:00:00').toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
 const accountIcon = (type) =>
   type === 'credit' ? CreditCard : type === 'cash' ? Banknote : Landmark;
+function isCardPayment(transaction, data) {
+  return (
+    !!transaction.transferId &&
+    data.transactions.some(
+      (t) =>
+        t.transferId === transaction.transferId &&
+        data.accounts.some((a) => a.id === t.accountId && a.type === 'credit'),
+    )
+  );
+}
 async function api(path, method = 'GET', body) {
   const r = await fetch('/api' + path, {
     method,
@@ -70,6 +83,8 @@ export default function App() {
     [error, setError] = useState(''),
     [toast, setToast] = useState(''),
     [mobile, setMobile] = useState(false);
+  const [draggedGroup, setDraggedGroup] = useState(null);
+  const [groupDrop, setGroupDrop] = useState(null);
   const snapshot = useMemo(() => (data ? calculateBudget(data, month) : null), [data, month]);
   const currentBalances = useMemo(
     () => (data ? calculateBudget(data, today().slice(0, 7)).accounts : []),
@@ -163,6 +178,20 @@ export default function App() {
     } finally {
       setBusy(false);
     }
+  }
+  function reorderGroup(source, target, after = false) {
+    if (busy || source === target) return;
+    const ids = data.groups.map((g) => g.id);
+    if (!ids.includes(source) || !ids.includes(target)) return;
+    const reordered = ids.filter((id) => id !== source);
+    reordered.splice(reordered.indexOf(target) + (after ? 1 : 0), 0, source);
+    if (ids.every((id, i) => id === reordered[i])) return;
+    return mutate('/groups/order', 'PUT', { groupIds: reordered }, 'Group order saved.', false);
+  }
+  function moveGroup(id, direction) {
+    const index = data.groups.findIndex((g) => g.id === id);
+    const target = data.groups[index + direction];
+    if (target) return reorderGroup(id, target.id, direction > 0);
   }
   async function restore(file) {
     if (!file) return;
@@ -583,11 +612,19 @@ export default function App() {
                       <div className="tab active">
                         All categories <span>{data.categories.length}</span>
                       </div>
-                      <button className="text-button" onClick={() => open({ type: 'category' })}>
+                      <button
+                        className="text-button"
+                        disabled={!data.groups.length}
+                        onClick={() => open({ type: 'category' })}
+                      >
                         <Plus size={15} /> Add category
                       </button>
                     </div>
                     <div className="table-scroll">
+                      <span className="sr-only" id="group-drag-help">
+                        Drag to reorder groups, or use the up and down arrow keys. Group options
+                        also include move buttons.
+                      </span>
                       <table className="budget-table">
                         <thead>
                           <tr>
@@ -602,24 +639,91 @@ export default function App() {
                             const rows = snapshot.rows.filter((c) => c.groupId === g.id);
                             return (
                               <React.Fragment key={g.id}>
-                                <tr className="group-row">
+                                <tr
+                                  className={`group-row ${draggedGroup === g.id ? 'group-dragging' : ''} ${groupDrop?.id === g.id ? `group-drop-${groupDrop.after ? 'after' : 'before'}` : ''}`}
+                                  data-group-id={g.id}
+                                  onDragOver={(e) => {
+                                    if (!draggedGroup || busy || draggedGroup === g.id) return;
+                                    e.preventDefault();
+                                    e.dataTransfer.dropEffect = 'move';
+                                    const bounds = e.currentTarget.getBoundingClientRect();
+                                    const after = e.clientY > bounds.top + bounds.height / 2;
+                                    if (groupDrop?.id !== g.id || groupDrop?.after !== after)
+                                      setGroupDrop({ id: g.id, after });
+                                  }}
+                                  onDragLeave={(e) => {
+                                    if (!e.currentTarget.contains(e.relatedTarget))
+                                      setGroupDrop(null);
+                                  }}
+                                  onDrop={(e) => {
+                                    e.preventDefault();
+                                    const source = e.dataTransfer.getData('text/plain');
+                                    const bounds = e.currentTarget.getBoundingClientRect();
+                                    if (source)
+                                      reorderGroup(
+                                        source,
+                                        g.id,
+                                        e.clientY > bounds.top + bounds.height / 2,
+                                      );
+                                    setDraggedGroup(null);
+                                    setGroupDrop(null);
+                                  }}
+                                >
                                   <td>
-                                    <button
-                                      onClick={() =>
-                                        setCollapsed((prev) => {
-                                          const n = new Set(prev);
-                                          n.has(g.id) ? n.delete(g.id) : n.add(g.id);
-                                          return n;
-                                        })
-                                      }
-                                    >
-                                      <ChevronDown
-                                        size={15}
-                                        className={collapsed.has(g.id) ? 'rotated' : ''}
-                                      />
-                                      {g.name}
-                                      <span>{rows.length}</span>
-                                    </button>
+                                    <div className="group-label">
+                                      <button
+                                        className="group-drag-handle"
+                                        aria-label={`Reorder ${g.name}`}
+                                        aria-describedby="group-drag-help"
+                                        title="Drag to reorder. Use arrow keys to move up or down."
+                                        draggable={!busy}
+                                        disabled={busy}
+                                        onDragStart={(e) => {
+                                          e.dataTransfer.effectAllowed = 'move';
+                                          e.dataTransfer.setData('text/plain', g.id);
+                                          setDraggedGroup(g.id);
+                                        }}
+                                        onDragEnd={() => {
+                                          setDraggedGroup(null);
+                                          setGroupDrop(null);
+                                        }}
+                                        onKeyDown={(e) => {
+                                          if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+                                            e.preventDefault();
+                                            moveGroup(g.id, e.key === 'ArrowUp' ? -1 : 1);
+                                          }
+                                        }}
+                                      >
+                                        <GripVertical size={14} />
+                                      </button>
+                                      <button
+                                        className="group-collapse"
+                                        aria-expanded={!collapsed.has(g.id)}
+                                        onClick={() =>
+                                          setCollapsed((prev) => {
+                                            const n = new Set(prev);
+                                            n.has(g.id) ? n.delete(g.id) : n.add(g.id);
+                                            return n;
+                                          })
+                                        }
+                                      >
+                                        <ChevronDown
+                                          size={15}
+                                          className={collapsed.has(g.id) ? 'rotated' : ''}
+                                        />
+                                        {g.name}
+                                        <span>{rows.length}</span>
+                                      </button>
+                                      <button
+                                        className="group-options"
+                                        aria-label={`Options for ${g.name}`}
+                                        title="Group options"
+                                        disabled={busy}
+                                        onClick={() => open({ type: 'manageGroup', group: g })}
+                                      >
+                                        <MoreHorizontal size={16} />
+                                      </button>
+                                    </div>
                                   </td>
                                   <td>
                                     <Amount value={rows.reduce((s, c) => s + c.assigned, 0)} />
@@ -993,7 +1097,9 @@ export default function App() {
                                   }
                                 >
                                   {t.transferId
-                                    ? 'Account transfer'
+                                    ? isCardPayment(t, data)
+                                      ? 'Credit card payment'
+                                      : 'Account transfer'
                                     : data.categories.find((c) => c.id === t.categoryId)?.name ||
                                       (t.amount > 0 ? 'Ready to assign' : 'Needs a category')}
                                 </span>
@@ -1217,6 +1323,64 @@ export default function App() {
     </div>
   );
   function renderModal() {
+    if (modal.type === 'manageGroup') {
+      const index = data.groups.findIndex((g) => g.id === modal.group.id);
+      return (
+        <div className="form-body">
+          <p>
+            Move this group and its categories together. You can also drag the handle beside the
+            group name.
+          </p>
+          <div className="group-move-actions">
+            <button
+              className="button secondary"
+              disabled={busy || index <= 0}
+              onClick={() => moveGroup(modal.group.id, -1)}
+            >
+              <ArrowUp size={16} /> Move up
+            </button>
+            <button
+              className="button secondary"
+              disabled={busy || index === data.groups.length - 1}
+              onClick={() => moveGroup(modal.group.id, 1)}
+            >
+              <ArrowDown size={16} /> Move down
+            </button>
+          </div>
+          <p className="small muted">
+            Position {index + 1} of {data.groups.length}
+          </p>
+          {formError}
+          <div className="modal-actions">
+            <button
+              className="button secondary text-red"
+              disabled={busy}
+              onClick={() => open({ type: 'deleteGroup', group: modal.group })}
+            >
+              <Trash2 size={15} /> Delete group
+            </button>
+          </div>
+        </div>
+      );
+    }
+    if (modal.type === 'deleteGroup')
+      return (
+        <DeleteGroupForm
+          group={modal.group}
+          data={data}
+          busy={busy}
+          error={formError}
+          onCancel={close}
+          onDelete={(body) =>
+            mutate(
+              '/groups/' + modal.group.id,
+              'DELETE',
+              body,
+              'Group deleted. Your categories and budget history are preserved.',
+            )
+          }
+        />
+      );
     if (modal.type === 'help')
       return (
         <div className="help-content">
@@ -1503,7 +1667,11 @@ export default function App() {
               '/transactions' + (t ? '/' + t.id : ''),
               t ? 'PATCH' : 'POST',
               body,
-              t ? 'Transaction updated.' : 'Transaction added.',
+              body.isCardPayment
+                ? 'Credit card payment saved. No category needed.'
+                : t
+                  ? 'Transaction updated.'
+                  : 'Transaction added.',
             )
           }
           onDelete={() => open({ type: 'delete', transaction: t })}
@@ -1682,6 +1850,8 @@ function modalTitle(m) {
     account: m.account ? 'Edit your account' : 'Add an account',
     category: m.category ? 'Make this category yours' : 'A place for your money',
     group: 'Bring your categories together',
+    manageGroup: m.group?.name,
+    deleteGroup: `Delete ${m.group?.name}?`,
     transaction: m.transaction ? 'Edit transaction' : 'Add a transaction',
     transfer: 'Move between accounts',
     move: 'A little room to move.',
@@ -1765,6 +1935,32 @@ function TransactionForm({
 }) {
   const [direction, setDirection] = useState(t?.amount > 0 ? 'inflow' : 'outflow'),
     [cat, setCat] = useState(t?.categoryId || '');
+  const [payment, setPayment] = useState(false);
+  const [accountId, setAccountId] = useState(
+    t?.accountId || (account === 'all' ? data.accounts[0]?.id : account),
+  );
+  const [paymentAccountId, setPaymentAccountId] = useState('');
+  const [draftAmount, setDraftAmount] = useState(t ? (Math.abs(t.amount) / 100).toFixed(2) : '');
+  const [draftDate, setDraftDate] = useState(t?.date || today());
+  const sourceIsCard = data.accounts.find((a) => a.id === accountId)?.type === 'credit';
+  const paymentAccounts = data.accounts.filter((a) => (a.type === 'credit') !== sourceIsCard);
+  const otherAccountId = paymentAccounts.some((a) => a.id === paymentAccountId)
+    ? paymentAccountId
+    : paymentAccounts[0]?.id || '';
+  let matchingAmount = 0;
+  try {
+    matchingAmount = cents(draftAmount);
+  } catch {
+    /* Invalid input is reported on submit. */
+  }
+  const candidates = data.transactions.filter(
+    (candidate) =>
+      candidate.id !== t?.id &&
+      !candidate.transferId &&
+      candidate.accountId === otherAccountId &&
+      candidate.date === draftDate &&
+      candidate.amount === matchingAmount * (sourceIsCard ? -1 : 1),
+  );
   return (
     <Form
       busy={busy}
@@ -1775,35 +1971,47 @@ function TransactionForm({
           const n = cents(f.get('amount'));
           if (n <= 0) throw new Error('Enter a positive amount and choose inflow or outflow.');
           onSave({
-            accountId: f.get('accountId'),
+            accountId,
             date: f.get('date'),
-            payee: f.get('payee'),
-            categoryId: cat || null,
-            amount: n * (direction === 'outflow' ? -1 : 1),
+            payee: f.get('payee') || (payment ? 'Credit card payment' : ''),
+            categoryId: payment ? null : cat || null,
+            amount: n * (payment ? (sourceIsCard ? 1 : -1) : direction === 'outflow' ? -1 : 1),
             memo: f.get('memo'),
             cleared: f.get('cleared') === 'on',
+            isCardPayment: payment,
+            paymentAccountId: payment ? otherAccountId : undefined,
+            matchingTransactionId:
+              payment && f.get('matchingTransactionId') !== 'new'
+                ? f.get('matchingTransactionId')
+                : undefined,
           });
         } catch (e) {
           onError(e.message);
         }
       }}
     >
-      <div className="segmented">
-        <button
-          type="button"
-          className={direction === 'outflow' ? 'active' : ''}
-          onClick={() => setDirection('outflow')}
-        >
-          Outflow
-        </button>
-        <button
-          type="button"
-          className={direction === 'inflow' ? 'active' : ''}
-          onClick={() => setDirection('inflow')}
-        >
-          Inflow / refund
-        </button>
-      </div>
+      <label className="check-label payment-toggle">
+        <input type="checkbox" checked={payment} onChange={(e) => setPayment(e.target.checked)} />
+        <CreditCard size={17} /> Credit card payment (no category)
+      </label>
+      {!payment && (
+        <div className="segmented">
+          <button
+            type="button"
+            className={direction === 'outflow' ? 'active' : ''}
+            onClick={() => setDirection('outflow')}
+          >
+            Outflow
+          </button>
+          <button
+            type="button"
+            className={direction === 'inflow' ? 'active' : ''}
+            onClick={() => setDirection('inflow')}
+          >
+            Inflow / refund
+          </button>
+        </div>
+      )}
       <div className="form-grid">
         <Field label="Amount">
           <input
@@ -1812,7 +2020,8 @@ function TransactionForm({
             autoFocus
             inputMode="decimal"
             placeholder="0.00"
-            defaultValue={t ? (Math.abs(t.amount) / 100).toFixed(2) : ''}
+            value={draftAmount}
+            onChange={(e) => setDraftAmount(e.target.value)}
           />
         </Field>
         <Field label="Date">
@@ -1822,17 +2031,24 @@ function TransactionForm({
             required
             min="2000-01-01"
             max="2099-12-31"
-            defaultValue={t?.date || today()}
+            value={draftDate}
+            onChange={(e) => setDraftDate(e.target.value)}
           />
         </Field>
       </div>
       <Field label="Payee">
         <input
           name="payee"
-          required
+          required={!payment}
           maxLength={200}
           defaultValue={t?.payee}
-          placeholder={direction === 'outflow' ? 'Where did it go?' : 'Where did it come from?'}
+          placeholder={
+            payment
+              ? 'Credit card payment'
+              : direction === 'outflow'
+                ? 'Where did it go?'
+                : 'Where did it come from?'
+          }
           list="payees"
         />
         <datalist id="payees">
@@ -1847,7 +2063,11 @@ function TransactionForm({
         <Field label="Account">
           <select
             name="accountId"
-            defaultValue={t?.accountId || (account === 'all' ? data.accounts[0]?.id : account)}
+            value={accountId}
+            onChange={(e) => {
+              setAccountId(e.target.value);
+              setPaymentAccountId('');
+            }}
           >
             {data.accounts.map((a) => (
               <option value={a.id} key={a.id}>
@@ -1856,13 +2076,73 @@ function TransactionForm({
             ))}
           </select>
         </Field>
-        <Field label="Category">
-          <select value={cat} onChange={(e) => setCat(e.target.value)}>
-            <CategoryOptions data={data} />
-          </select>
-        </Field>
+        {payment ? (
+          <Field label={sourceIsCard ? 'Paid from account' : 'Paid to credit card'}>
+            <select
+              required
+              value={otherAccountId}
+              onChange={(e) => setPaymentAccountId(e.target.value)}
+            >
+              {!paymentAccounts.length && (
+                <option value="">
+                  Add a {sourceIsCard ? 'cash' : 'credit card'} account first
+                </option>
+              )}
+              {paymentAccounts.map((a) => (
+                <option key={a.id} value={a.id}>
+                  {a.name}
+                </option>
+              ))}
+            </select>
+          </Field>
+        ) : (
+          <Field label="Category">
+            <select value={cat} onChange={(e) => setCat(e.target.value)}>
+              <CategoryOptions data={data} />
+            </select>
+          </Field>
+        )}
       </div>
-      {direction === 'inflow' && (
+      {payment && (
+        <>
+          <p className="muted small">
+            This is a transfer, not spending or income. It uses the card’s payment reserve and needs
+            no spending category.{' '}
+            {sourceIsCard
+              ? 'Money enters this card from the selected cash account.'
+              : 'Money leaves this account and pays down the selected card.'}
+          </p>
+          {candidates.length > 0 ? (
+            <Field
+              label="Matching transaction in the other account"
+              hint="Link an imported entry to avoid recording the payment twice."
+            >
+              <select
+                key={`${accountId}-${otherAccountId}-${draftAmount}-${draftDate}`}
+                name="matchingTransactionId"
+                required
+                defaultValue={candidates.length === 1 ? candidates[0].id : ''}
+              >
+                <option value="" disabled>
+                  Choose a matching entry
+                </option>
+                {candidates.map((candidate) => (
+                  <option value={candidate.id} key={candidate.id}>
+                    {candidate.date} · {candidate.payee} · {money(candidate.amount)}
+                  </option>
+                ))}
+                <option value="new">Create a separate entry instead</option>
+              </select>
+            </Field>
+          ) : (
+            <p className="muted small">
+              A matching entry will be created in the other account. Existing matches must have the
+              same date and opposite amount.
+            </p>
+          )}
+        </>
+      )}
+      {!payment && direction === 'inflow' && (
         <p className="muted small">
           For income, choose Ready to assign. For a refund, choose the original spending category.
         </p>
@@ -2040,5 +2320,67 @@ function Insights({ data, month, setMonth, snapshot }) {
         </section>
       </div>
     </div>
+  );
+}
+
+function DeleteGroupForm({ group, data, busy, error, onCancel, onDelete }) {
+  const others = data.groups.filter((g) => g.id !== group.id);
+  const categories = data.categories.filter((c) => c.groupId === group.id);
+  const [destination, setDestination] = useState(others[0]?.id || 'new');
+  return (
+    <form
+      className="form-body"
+      onSubmit={(e) => {
+        e.preventDefault();
+        const fields = new FormData(e.currentTarget);
+        onDelete(
+          categories.length
+            ? destination === 'new'
+              ? { newGroupName: fields.get('newGroupName') }
+              : { targetGroupId: destination }
+            : {},
+        );
+      }}
+    >
+      <p>
+        {categories.length
+          ? `This group contains ${categories.length} ${categories.length === 1 ? 'category' : 'categories'}. Choose where to move them before deleting the group. Their money, targets, and transaction history will stay intact.`
+          : 'This group is empty. Deleting it won’t change your categories or budget balances.'}
+      </p>
+      {categories.length > 0 && (
+        <div className="group-delete-destination">
+          <Field label="Move categories to">
+            <select value={destination} onChange={(e) => setDestination(e.target.value)}>
+              {others.map((g) => (
+                <option key={g.id} value={g.id}>
+                  {g.name}
+                </option>
+              ))}
+              <option value="new">Create a new group…</option>
+            </select>
+          </Field>
+          {destination === 'new' && (
+            <Field label="New group name">
+              <input
+                name="newGroupName"
+                required
+                maxLength={200}
+                placeholder="e.g. Other categories"
+                autoFocus
+              />
+            </Field>
+          )}
+        </div>
+      )}
+      {error}
+      <div className="modal-actions">
+        <button className="button secondary" type="button" disabled={busy} onClick={onCancel}>
+          Keep group
+        </button>
+        <button className="button danger" type="submit" disabled={busy}>
+          {busy ? 'Deleting…' : 'Delete group'}
+        </button>
+      </div>
+    </form>
   );
 }

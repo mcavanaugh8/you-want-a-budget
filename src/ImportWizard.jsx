@@ -283,8 +283,10 @@ export default function ImportWizard({ data, initialAccount, onImport, busy }) {
             </table>
           </div>
           <p className="muted small">
-            Payments and transfers need paired account entries. Exclude those rows here and add an
-            account transfer in the app. Expenses without a category will be flagged for review.
+            Ordinary transfers need paired account entries; exclude those rows and add an account
+            transfer. You can import card payments, then edit them and select Credit card payment
+            (no category). Import both sides first to link matching entries. Other expenses without
+            a category are flagged for review.
           </p>
         </>
       )}

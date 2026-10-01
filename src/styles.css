@@ -2349,3 +2349,67 @@ svg {
     scroll-behavior: auto !important;
   }
 }
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+.group-label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.group-row .group-drag-handle {
+  cursor: grab;
+  padding: 7px 1px;
+  flex-shrink: 0;
+}
+.group-row .group-drag-handle:active {
+  cursor: grabbing;
+}
+.group-row .group-collapse {
+  flex: 1;
+  min-width: 0;
+}
+.group-row .group-options {
+  flex-shrink: 0;
+  padding: 6px 2px;
+  border-radius: 4px;
+}
+.group-row .group-options:hover {
+  background: #e2e9d7;
+}
+.group-row.group-dragging {
+  opacity: 0.45;
+}
+.group-row.group-drop-before td {
+  box-shadow: inset 0 3px #668855;
+}
+.group-row.group-drop-after td {
+  box-shadow: inset 0 -3px #668855;
+}
+.group-move-actions {
+  display: flex;
+  gap: 12px;
+  margin: 22px 0 15px;
+}
+.group-delete-destination {
+  margin-top: 22px;
+}
+.payment-toggle {
+  padding: 12px;
+  margin: 0 0 20px;
+  background: #f1f5e9;
+  border-radius: 7px;
+  color: #567445;
+}
+.group-drag-handle svg {
+  pointer-events: none;
+}
