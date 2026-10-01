@@ -264,13 +264,17 @@ export default function ImportWizard({ data, initialAccount, onImport, busy }) {
                           </small>
                         </td>
                         <td>
-                          <select
-                            aria-label={`Category for row ${r.row}`}
-                            value={edits[r.row] || ''}
-                            onChange={(e) => setEdits({ ...edits, [r.row]: e.target.value })}
-                          >
-                            <CategoryOptions data={data} />
-                          </select>
+                          {selectedAccount?.type === 'investment' ? (
+                            <span className="muted">Investment activity · no category</span>
+                          ) : (
+                            <select
+                              aria-label={`Category for row ${r.row}`}
+                              value={edits[r.row] || ''}
+                              onChange={(e) => setEdits({ ...edits, [r.row]: e.target.value })}
+                            >
+                              <CategoryOptions data={data} />
+                            </select>
+                          )}
                         </td>
                         <td className={'align-right money ' + (r.amount > 0 ? 'text-green' : '')}>
                           {money(r.amount)}
@@ -320,7 +324,11 @@ export default function ImportWizard({ data, initialAccount, onImport, busy }) {
                 includeDuplicates,
                 rows: rows
                   .filter((r) => !r.error && !excluded.has(r.row))
-                  .map((r) => ({ ...r, categoryId: edits[r.row] || null })),
+                  .map((r) => ({
+                    ...r,
+                    categoryId:
+                      selectedAccount?.type === 'investment' ? null : edits[r.row] || null,
+                  })),
               })
             }
           >

@@ -4,6 +4,7 @@ import { atomic, readBudget } from './database.js';
 import { calculateBudget } from '../shared/budget.js';
 import { validDate, validMonth, today, nextMonth } from '../shared/money.js';
 import { markDuplicates } from '../shared/csv.js';
+import { ACCOUNT_TYPES, isCashAccount } from '../shared/accounts.js';
 const id = () => randomUUID();
 const fail = (message, status = 400) => {
   throw Object.assign(new Error(message), { status });
@@ -43,17 +44,23 @@ function category(db, budgetId, groupId, title, target = 0, accountId = null, po
   );
   return key;
 }
+function openingBalance(type, input) {
+  const value = amount(input.openingBalance);
+  if (type !== 'credit') return value;
+  if (input.creditBalanceType && !['debt', 'credit'].includes(input.creditBalanceType))
+    fail('Choose amount owed or credit balance.');
+  return input.creditBalanceType === 'credit' ? Math.abs(value) : -Math.abs(value);
+}
 function addAccount(db, budgetId, input) {
   const key = id(),
     type = input.type;
-  if (!['checking', 'savings', 'cash', 'credit'].includes(type))
-    fail('Choose a valid account type.');
+  if (!ACCOUNT_TYPES.includes(type)) fail('Choose a valid account type.');
   db.prepare('INSERT INTO accounts VALUES(?,?,?,?,?,?)').run(
     key,
     budgetId,
     name(input.name),
     type,
-    amount(input.openingBalance),
+    openingBalance(type, input),
     date(input.openingDate),
   );
   if (type === 'credit') {
@@ -78,7 +85,7 @@ function validateTx(data, input) {
     fail(
       `Transaction predates ${a.name}'s opening balance. Change the account opening date or import more recent transactions.`,
     );
-  const cat = input.categoryId || null;
+  const cat = a.type === 'investment' ? null : input.categoryId || null;
   if (cat && !data.categories.some((c) => c.id === cat && !c.accountId))
     fail('Choose a spending category. Use an account transfer for credit card payments.');
   if (
@@ -121,8 +128,11 @@ function createTransfer(db, data, input) {
   const from = data.accounts.find((a) => a.id === input.from),
     to = data.accounts.find((a) => a.id === input.to);
   if (!from || !to || from.id === to.id) fail('Choose two different accounts.');
-  if (from.type === 'credit')
-    fail('Transfers must originate from a cash, checking, or savings account.');
+  if (from.type === 'credit') fail('Transfers cannot originate from a credit card.');
+  if (from.type === 'investment' && to.type === 'credit')
+    fail('Move investment funds to a cash account before paying a credit card.');
+  if (isCashAccount(from) && to.type === 'investment' && !input.categoryId)
+    fail('Choose a category for money leaving your budget for investments.');
   const value = amount(input.amount);
   if (value <= 0) fail('Transfer amount must be positive.');
   const transferId = id();
@@ -137,6 +147,7 @@ function createTransfer(db, data, input) {
       amount: v,
       memo: input.memo || '',
       cleared: input.cleared,
+      categoryId: isCashAccount(a) && peer.type === 'investment' ? input.categoryId || null : null,
     });
     t.transferId = transferId;
     insertTx(db, t);
@@ -149,6 +160,8 @@ function saveCardPayment(db, data, input, old = null) {
   if (
     !other ||
     other.id === account.id ||
+    account.type === 'investment' ||
+    other.type === 'investment' ||
     (account.type === 'credit') === (other.type === 'credit')
   )
     fail('Choose one cash account and one credit card account for this payment.');
@@ -326,7 +339,7 @@ export function createApp(db) {
       db.prepare('UPDATE accounts SET name=?,openingDate=?,openingBalance=? WHERE id=?').run(
         name(req.body.name),
         d,
-        amount(req.body.openingBalance),
+        openingBalance(a.type, req.body),
         a.id,
       );
       db.prepare('UPDATE categories SET name=? WHERE accountId=?').run(name(req.body.name), a.id);
@@ -641,8 +654,7 @@ function restore(db, payload) {
         Number.isInteger(g.position) ? g.position : 0,
       );
     for (const a of payload.accounts) {
-      if (!['checking', 'savings', 'cash', 'credit'].includes(a.type))
-        fail('Invalid account type in backup.');
+      if (!ACCOUNT_TYPES.includes(a.type)) fail('Invalid account type in backup.');
       db.prepare('INSERT INTO accounts VALUES(?,?,?,?,?,?)').run(
         mapId(a.id),
         budgetId,
@@ -696,10 +708,28 @@ function restore(db, payload) {
         pair.length !== 2 ||
         pair[0].amount + pair[1].amount !== 0 ||
         pair[0].accountId === pair[1].accountId ||
-        pair[0].date !== pair[1].date ||
-        pair.some((t) => t.categoryId)
+        pair[0].date !== pair[1].date
       )
         fail('Invalid transfer pair in backup.');
+      const from = pair.find((t) => t.amount < 0),
+        to = pair.find((t) => t.amount > 0);
+      const fromAccount = restored.accounts.find((a) => a.id === from.accountId);
+      const toAccount = restored.accounts.find((a) => a.id === to.accountId);
+      if (
+        fromAccount.type === 'credit' ||
+        (fromAccount.type === 'investment' && toAccount.type === 'credit')
+      )
+        fail('Unsupported transfer in backup.');
+      if (isCashAccount(fromAccount) && toAccount.type === 'investment' && !from.categoryId)
+        fail('Investment contributions need a category.');
+      for (const t of pair) {
+        const own = restored.accounts.find((a) => a.id === t.accountId);
+        const peer = restored.accounts.find(
+          (a) => a.id !== t.accountId && pair.some((p) => p.accountId === a.id),
+        );
+        if (t.categoryId && !(isCashAccount(own) && peer.type === 'investment'))
+          fail('Invalid transfer category in backup.');
+      }
     }
     // Payment envelopes must exist exactly once per card, never for cash accounts.
     for (const a of restored.accounts) {

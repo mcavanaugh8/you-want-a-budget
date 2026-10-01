@@ -1,10 +1,16 @@
 import { nextMonth } from './money.js';
+import { isCashAccount, summarizeNetWorth } from './accounts.js';
 
 // All arithmetic uses integer cents. Month-end cash deficits reduce the next
 // month's Ready to Assign. Unfunded card spending becomes debt, not lost cash.
 export function calculateBudget(data, month) {
   const { accounts, categories, transactions, assignments } = data;
   const accountMap = new Map(accounts.map((a) => [a.id, a]));
+  const transferAccounts = new Map();
+  for (const t of transactions.filter((t) => t.transferId)) {
+    if (!transferAccounts.has(t.transferId)) transferAccounts.set(t.transferId, []);
+    transferAccounts.get(t.transferId).push(t.accountId);
+  }
   const starts = [
     month,
     ...accounts.map((a) => a.openingDate.slice(0, 7)),
@@ -28,14 +34,23 @@ export function calculateBudget(data, month) {
     }));
     const rowMap = new Map(rows.map((c) => [c.id, c]));
     const monthTx = transactions.filter((t) => t.date.slice(0, 7) === cursor);
+    const budgetTx = monthTx.filter((t) => {
+      const account = accountMap.get(t.accountId);
+      if (account?.type === 'investment') return false;
+      if (!t.transferId) return true;
+      return (
+        isCashAccount(account) &&
+        transferAccounts.get(t.transferId)?.some((id) => accountMap.get(id)?.type === 'investment')
+      );
+    });
     const monthAssignments = assignments.filter((a) => a.month === cursor);
-    const cashUncategorized = monthTx.filter(
-      (t) => !t.transferId && !t.categoryId && accountMap.get(t.accountId)?.type !== 'credit',
+    const cashUncategorized = budgetTx.filter(
+      (t) => !t.categoryId && isCashAccount(accountMap.get(t.accountId)),
     );
     const income = cashUncategorized.filter((t) => t.amount > 0).reduce((s, t) => s + t.amount, 0);
     const unassignedActivity = cashUncategorized.reduce((s, t) => s + t.amount, 0);
     const openingCash = accounts
-      .filter((a) => a.type !== 'credit' && a.openingDate.slice(0, 7) === cursor)
+      .filter((a) => isCashAccount(a) && a.openingDate.slice(0, 7) === cursor)
       .reduce((s, a) => s + a.openingBalance, 0);
     const assigned = monthAssignments.reduce((s, a) => s + a.amount, 0);
     ready += unassignedActivity + openingCash - assigned - cashDeficit;
@@ -43,9 +58,9 @@ export function calculateBudget(data, month) {
       if (rowMap.has(a.categoryId)) rowMap.get(a.categoryId).assigned += a.amount;
     for (const row of rows) row.available = row.carried + row.assigned;
     for (const row of rows.filter((c) => !c.accountId)) {
-      const relevant = monthTx.filter((t) => !t.transferId && t.categoryId === row.id);
+      const relevant = budgetTx.filter((t) => t.categoryId === row.id);
       const cashActivity = relevant
-        .filter((t) => accountMap.get(t.accountId)?.type !== 'credit')
+        .filter((t) => isCashAccount(accountMap.get(t.accountId)))
         .reduce((s, t) => s + t.amount, 0);
       const cardSpending = accounts
         .filter((a) => a.type === 'credit')
@@ -75,7 +90,7 @@ export function calculateBudget(data, month) {
       const account = accountMap.get(t.accountId);
       const peer = transactions.find((p) => p.transferId === t.transferId && p.id !== t.id);
       // A transfer from cash to a credit card uses the card's payment envelope.
-      if (account?.type === 'credit' && peer && accountMap.get(peer.accountId)?.type !== 'credit') {
+      if (account?.type === 'credit' && peer && isCashAccount(accountMap.get(peer.accountId))) {
         const reserve = rows.find((c) => c.accountId === account.id);
         if (reserve) {
           reserve.activity -= t.amount;
@@ -103,13 +118,14 @@ export function calculateBudget(data, month) {
       assigned,
       rows,
       accounts: balances,
+      ...summarizeNetWorth(balances),
       available: rows.reduce((s, c) => s + Math.max(0, c.available), 0),
       overspent: rows.reduce((s, c) => s + Math.max(0, -c.available), 0),
       cashDeficit,
-      spending: monthTx
-        .filter((t) => !t.transferId && (t.categoryId || t.amount < 0))
+      spending: budgetTx
+        .filter((t) => t.categoryId || t.amount < 0)
         .reduce((s, t) => s - t.amount, 0),
-      uncategorized: monthTx.filter((t) => !t.transferId && !t.categoryId && t.amount < 0).length,
+      uncategorized: budgetTx.filter((t) => !t.categoryId && t.amount < 0).length,
     };
     cursor = nextMonth(cursor);
   }

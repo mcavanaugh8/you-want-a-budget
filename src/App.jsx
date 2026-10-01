@@ -42,10 +42,17 @@ import { calculateBudget } from '../shared/budget.js';
 import { cents, money, today, nextMonth, validMonth } from '../shared/money.js';
 import { Modal, Field, Amount, Empty, Direction, CategoryOptions } from './components.jsx';
 import ImportWizard from './ImportWizard.jsx';
+import { isCashAccount, summarizeNetWorth } from '../shared/accounts.js';
 const monthLabel = (m) =>
   new Date(m + '-02T12:00:00').toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
 const accountIcon = (type) =>
-  type === 'credit' ? CreditCard : type === 'cash' ? Banknote : Landmark;
+  type === 'credit'
+    ? CreditCard
+    : type === 'investment'
+      ? TrendingUp
+      : type === 'cash'
+        ? Banknote
+        : Landmark;
 function isCardPayment(transaction, data) {
   return (
     !!transaction.transferId &&
@@ -241,13 +248,17 @@ export default function App() {
     data?.transactions.filter(
       (t) =>
         (accountFilter === 'all' || t.accountId === accountFilter) &&
-        (statusFilter !== 'uncategorized' || (!t.categoryId && !t.transferId && t.amount < 0)) &&
+        (statusFilter !== 'uncategorized' ||
+          (!t.categoryId &&
+            !t.transferId &&
+            t.amount < 0 &&
+            data.accounts.find((a) => a.id === t.accountId)?.type !== 'investment')) &&
         (statusFilter !== 'uncleared' || !t.cleared) &&
         `${t.payee} ${t.memo} ${data.categories.find((c) => c.id === t.categoryId)?.name || ''}`
           .toLowerCase()
           .includes(search.toLowerCase()),
     ) || [];
-  const totalBalance = currentBalances.reduce((s, a) => s + a.balance, 0);
+  const totalBalance = summarizeNetWorth(currentBalances).netWorth;
   return (
     <div className="app-shell">
       <aside className={`sidebar ${mobile ? 'mobile-open' : ''}`}>
@@ -1091,7 +1102,11 @@ export default function App() {
                               <td>
                                 <span
                                   className={
-                                    !t.categoryId && !t.transferId && t.amount < 0
+                                    !t.categoryId &&
+                                    !t.transferId &&
+                                    t.amount < 0 &&
+                                    data.accounts.find((a) => a.id === t.accountId)?.type !==
+                                      'investment'
                                       ? 'category-badge needs'
                                       : 'category-badge'
                                   }
@@ -1099,9 +1114,16 @@ export default function App() {
                                   {t.transferId
                                     ? isCardPayment(t, data)
                                       ? 'Credit card payment'
-                                      : 'Account transfer'
+                                      : t.categoryId
+                                        ? data.categories.find((c) => c.id === t.categoryId)?.name
+                                        : 'Account transfer'
                                     : data.categories.find((c) => c.id === t.categoryId)?.name ||
-                                      (t.amount > 0 ? 'Ready to assign' : 'Needs a category')}
+                                      (data.accounts.find((a) => a.id === t.accountId)?.type ===
+                                      'investment'
+                                        ? 'Investment activity'
+                                        : t.amount > 0
+                                          ? 'Ready to assign'
+                                          : 'Needs a category')}
                                 </span>
                               </td>
                               {accountFilter === 'all' && (
@@ -1389,8 +1411,9 @@ export default function App() {
             <div>
               <h3>Start with the money you have.</h3>
               <p>
-                Add checking, savings, cash, or credit card accounts with a starting balance.
-                Opening cash is ready to assign. Existing card debt needs its own payment funding.
+                Add checking, savings, cash, credit card, or investment accounts with a starting
+                balance. Opening cash is ready to assign. Investments count toward net worth but
+                stay outside your budget. Existing card debt needs its own payment funding.
               </p>
             </div>
           </div>
@@ -1484,85 +1507,23 @@ export default function App() {
           )}
         </Form>
       );
-    if (modal.type === 'account') {
-      const a = modal.account;
+    if (modal.type === 'account')
       return (
-        <Form
+        <AccountForm
+          account={modal.account}
           busy={busy}
           error={formError}
-          submitLabel={a ? 'Save account' : 'Add account'}
-          onSubmit={(f) => {
-            try {
-              const type = a?.type || f.get('type');
-              const balance = cents(f.get('balance'));
-              return mutate(
-                '/accounts' + (a ? '/' + a.id : ''),
-                a ? 'PATCH' : 'POST',
-                {
-                  name: f.get('name'),
-                  type,
-                  openingBalance: type === 'credit' && !a ? -Math.abs(balance) : balance,
-                  openingDate: f.get('date'),
-                },
-                a ? 'Account updated.' : 'Account added.',
-              );
-            } catch (e) {
-              setError(e.message);
-            }
-          }}
-        >
-          <Field label="Account name">
-            <input
-              name="name"
-              autoFocus
-              required
-              maxLength={200}
-              placeholder="e.g. Chase checking"
-              defaultValue={a?.name}
-            />
-          </Field>
-          <Field label="Account type">
-            <select name="type" defaultValue={a?.type || 'checking'} disabled={!!a}>
-              <option value="checking">Checking</option>
-              <option value="savings">Savings</option>
-              <option value="cash">Cash</option>
-              <option value="credit">Credit card</option>
-            </select>
-          </Field>
-          <div className="form-grid">
-            <Field
-              label="Opening balance"
-              hint={
-                a?.type === 'credit'
-                  ? 'Use a negative amount for card debt.'
-                  : 'For a new credit card, enter the amount owed.'
-              }
-            >
-              <input
-                name="balance"
-                inputMode="decimal"
-                required
-                defaultValue={a ? (a.openingBalance / 100).toFixed(2) : '0.00'}
-              />
-            </Field>
-            <Field label="Opening date" hint="Use the balance before transactions on this date.">
-              <input
-                name="date"
-                type="date"
-                min="2000-01-01"
-                max="2099-12-31"
-                required
-                defaultValue={a?.openingDate || today()}
-              />
-            </Field>
-          </div>
-          <p className="muted small">
-            Importing older transactions? Use an opening date and balance from before that history
-            begins, so those transactions aren’t counted twice.
-          </p>
-        </Form>
+          onError={setError}
+          onSave={(body) =>
+            mutate(
+              '/accounts' + (modal.account ? '/' + modal.account.id : ''),
+              modal.account ? 'PATCH' : 'POST',
+              body,
+              modal.account ? 'Account updated.' : 'Account added.',
+            )
+          }
+        />
       );
-    }
     if (modal.type === 'group')
       return (
         <Form
@@ -1680,76 +1641,16 @@ export default function App() {
     }
     if (modal.type === 'transfer')
       return (
-        <Form
+        <TransferForm
+          data={data}
+          accountFilter={accountFilter}
           busy={busy}
           error={formError}
-          submitLabel="Transfer money"
-          onSubmit={(f) => {
-            try {
-              return mutate(
-                '/transfers',
-                'POST',
-                {
-                  from: f.get('from'),
-                  to: f.get('to'),
-                  date: f.get('date'),
-                  amount: cents(f.get('amount')),
-                  memo: f.get('memo'),
-                  cleared: false,
-                },
-                'Transfer recorded in both accounts.',
-              );
-            } catch (e) {
-              setError(e.message);
-            }
-          }}
-        >
-          <div className="form-grid">
-            <Field label="From account">
-              <select
-                name="from"
-                defaultValue={accountFilter !== 'all' ? accountFilter : undefined}
-              >
-                {data.accounts
-                  .filter((a) => a.type !== 'credit')
-                  .map((a) => (
-                    <option key={a.id} value={a.id}>
-                      {a.name}
-                    </option>
-                  ))}
-              </select>
-            </Field>
-            <Field label="To account">
-              <select name="to" defaultValue={data.accounts[1]?.id}>
-                {data.accounts.map((a) => (
-                  <option key={a.id} value={a.id}>
-                    {a.name}
-                  </option>
-                ))}
-              </select>
-            </Field>
-            <Field label="Amount">
-              <input name="amount" required autoFocus inputMode="decimal" placeholder="0.00" />
-            </Field>
-            <Field label="Date">
-              <input
-                name="date"
-                type="date"
-                min="2000-01-01"
-                max="2099-12-31"
-                required
-                defaultValue={today()}
-              />
-            </Field>
-          </div>
-          <Field label="Memo (optional)">
-            <input name="memo" maxLength={2000} />
-          </Field>
-          <p className="muted small">
-            Transfers update both accounts. Credit card payments use money reserved in the card’s
-            payment category.
-          </p>
-        </Form>
+          onError={setError}
+          onSave={(body) =>
+            mutate('/transfers', 'POST', body, 'Transfer recorded in both accounts.')
+          }
+        />
       );
     if (modal.type === 'move')
       return (
@@ -1943,7 +1844,10 @@ function TransactionForm({
   const [draftAmount, setDraftAmount] = useState(t ? (Math.abs(t.amount) / 100).toFixed(2) : '');
   const [draftDate, setDraftDate] = useState(t?.date || today());
   const sourceIsCard = data.accounts.find((a) => a.id === accountId)?.type === 'credit';
-  const paymentAccounts = data.accounts.filter((a) => (a.type === 'credit') !== sourceIsCard);
+  const sourceIsInvestment = data.accounts.find((a) => a.id === accountId)?.type === 'investment';
+  const paymentAccounts = data.accounts.filter((a) =>
+    sourceIsCard ? isCashAccount(a) : a.type === 'credit',
+  );
   const otherAccountId = paymentAccounts.some((a) => a.id === paymentAccountId)
     ? paymentAccountId
     : paymentAccounts[0]?.id || '';
@@ -1974,7 +1878,7 @@ function TransactionForm({
             accountId,
             date: f.get('date'),
             payee: f.get('payee') || (payment ? 'Credit card payment' : ''),
-            categoryId: payment ? null : cat || null,
+            categoryId: payment || sourceIsInvestment ? null : cat || null,
             amount: n * (payment ? (sourceIsCard ? 1 : -1) : direction === 'outflow' ? -1 : 1),
             memo: f.get('memo'),
             cleared: f.get('cleared') === 'on',
@@ -1990,10 +1894,19 @@ function TransactionForm({
         }
       }}
     >
-      <label className="check-label payment-toggle">
-        <input type="checkbox" checked={payment} onChange={(e) => setPayment(e.target.checked)} />
-        <CreditCard size={17} /> Credit card payment (no category)
-      </label>
+      {!sourceIsInvestment && (
+        <label className="check-label payment-toggle">
+          <input type="checkbox" checked={payment} onChange={(e) => setPayment(e.target.checked)} />
+          <CreditCard size={17} /> Credit card payment (no category)
+        </label>
+      )}
+      {sourceIsInvestment && (
+        <p className="notice">
+          Investment activity updates account value and net worth without a spending category.
+          Record gains as inflows and losses as outflows. Use Account transfer for money moving to
+          or from your cash accounts.
+        </p>
+      )}
       {!payment && (
         <div className="segmented">
           <button
@@ -2067,6 +1980,8 @@ function TransactionForm({
             onChange={(e) => {
               setAccountId(e.target.value);
               setPaymentAccountId('');
+              if (data.accounts.find((a) => a.id === e.target.value)?.type === 'investment')
+                setPayment(false);
             }}
           >
             {data.accounts.map((a) => (
@@ -2095,13 +2010,13 @@ function TransactionForm({
               ))}
             </select>
           </Field>
-        ) : (
+        ) : !sourceIsInvestment ? (
           <Field label="Category">
             <select value={cat} onChange={(e) => setCat(e.target.value)}>
               <CategoryOptions data={data} />
             </select>
           </Field>
-        )}
+        ) : null}
       </div>
       {payment && (
         <>
@@ -2142,7 +2057,7 @@ function TransactionForm({
           )}
         </>
       )}
-      {!payment && direction === 'inflow' && (
+      {!payment && !sourceIsInvestment && direction === 'inflow' && (
         <p className="muted small">
           For income, choose Ready to assign. For a refund, choose the original spending category.
         </p>
@@ -2218,8 +2133,10 @@ function Insights({ data, month, setMonth, snapshot }) {
         </div>
         <div className="stat-card">
           <span className="stat-label">Net worth</span>
-          <Amount value={snapshot.accounts.reduce((s, a) => s + a.balance, 0)} />
-          <p>All accounts at the end of this month</p>
+          <Amount value={snapshot.netWorth} />
+          <p>
+            Assets {money(snapshot.assets)} − debts {money(snapshot.liabilities)}
+          </p>
         </div>
       </div>
       <div className="insights-grid">
@@ -2382,5 +2299,209 @@ function DeleteGroupForm({ group, data, busy, error, onCancel, onDelete }) {
         </button>
       </div>
     </form>
+  );
+}
+
+function AccountForm({ account: a, busy, error, onError, onSave }) {
+  const [type, setType] = useState(a?.type || 'checking');
+  const [creditType, setCreditType] = useState(a?.openingBalance > 0 ? 'credit' : 'debt');
+  return (
+    <Form
+      busy={busy}
+      error={error}
+      submitLabel={a ? 'Save account' : 'Add account'}
+      onSubmit={(f) => {
+        try {
+          onSave({
+            name: f.get('name'),
+            type,
+            openingBalance: cents(f.get('balance')),
+            openingDate: f.get('date'),
+            creditBalanceType: type === 'credit' ? creditType : undefined,
+          });
+        } catch (e) {
+          onError(e.message);
+        }
+      }}
+    >
+      <Field label="Account name">
+        <input
+          name="name"
+          autoFocus
+          required
+          maxLength={200}
+          placeholder="e.g. Checking or brokerage"
+          defaultValue={a?.name}
+        />
+      </Field>
+      <Field label="Account type">
+        <select name="type" value={type} onChange={(e) => setType(e.target.value)} disabled={!!a}>
+          <option value="checking">Checking</option>
+          <option value="savings">Savings</option>
+          <option value="cash">Cash</option>
+          <option value="credit">Credit card</option>
+          <option value="investment">Investment</option>
+        </select>
+      </Field>
+      {type === 'credit' && (
+        <Field label="Credit card balance type">
+          <select value={creditType} onChange={(e) => setCreditType(e.target.value)}>
+            <option value="debt">Amount owed (debt)</option>
+            <option value="credit">Credit balance (overpaid)</option>
+          </select>
+        </Field>
+      )}
+      {type === 'investment' && (
+        <div className="notice">
+          <TrendingUp size={20} />
+          <p>
+            Track your investment value in net worth. This account’s balance and investment activity
+            stay outside your spending budget.
+          </p>
+        </div>
+      )}
+      <div className="form-grid">
+        <Field
+          label="Opening balance"
+          hint={
+            type === 'credit'
+              ? creditType === 'debt'
+                ? 'Enter the amount owed. It is stored as debt and subtracted from net worth.'
+                : 'Use this only when the card issuer owes you money. This adds to net worth.'
+              : type === 'investment'
+                ? 'Enter the total investment value on the opening date.'
+                : 'Enter your starting account balance.'
+          }
+        >
+          <input
+            name="balance"
+            required
+            inputMode="decimal"
+            defaultValue={
+              a
+                ? (
+                    (a.type === 'credit' ? Math.abs(a.openingBalance) : a.openingBalance) / 100
+                  ).toFixed(2)
+                : '0.00'
+            }
+          />
+        </Field>
+        <Field label="Opening date" hint="Use the balance before transactions on this date.">
+          <input
+            name="date"
+            type="date"
+            required
+            min="2000-01-01"
+            max="2099-12-31"
+            defaultValue={a?.openingDate || today()}
+          />
+        </Field>
+      </div>
+      <p className="muted small">
+        Importing older transactions? Use an opening date and balance from before that history
+        begins, so those transactions aren’t counted twice.
+      </p>
+    </Form>
+  );
+}
+
+function TransferForm({ data, accountFilter, busy, error, onError, onSave }) {
+  const eligible = data.accounts.filter((a) => a.type !== 'credit');
+  const [fromId, setFromId] = useState(
+    eligible.find((a) => a.id === accountFilter)?.id || eligible[0]?.id || '',
+  );
+  const [toId, setToId] = useState(data.accounts.find((a) => a.id !== fromId)?.id || '');
+  const from = data.accounts.find((a) => a.id === fromId),
+    to = data.accounts.find((a) => a.id === toId);
+  const crossing =
+    (isCashAccount(from) && to?.type === 'investment') ||
+    (from?.type === 'investment' && isCashAccount(to));
+  const contribution = isCashAccount(from) && to?.type === 'investment';
+  return (
+    <Form
+      busy={busy}
+      error={error}
+      submitLabel="Transfer money"
+      onSubmit={(f) => {
+        try {
+          onSave({
+            from: fromId,
+            to: toId,
+            date: f.get('date'),
+            amount: cents(f.get('amount')),
+            memo: f.get('memo'),
+            cleared: false,
+            categoryId: crossing ? f.get('categoryId') || null : null,
+          });
+        } catch (e) {
+          onError(e.message);
+        }
+      }}
+    >
+      <div className="form-grid">
+        <Field label="From account">
+          <select name="from" required value={fromId} onChange={(e) => setFromId(e.target.value)}>
+            {eligible.map((a) => (
+              <option key={a.id} value={a.id}>
+                {a.name}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Field label="To account">
+          <select name="to" required value={toId} onChange={(e) => setToId(e.target.value)}>
+            {data.accounts.map((a) => (
+              <option key={a.id} value={a.id}>
+                {a.name}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Field label="Amount">
+          <input name="amount" required autoFocus inputMode="decimal" placeholder="0.00" />
+        </Field>
+        <Field label="Date">
+          <input
+            name="date"
+            type="date"
+            min="2000-01-01"
+            max="2099-12-31"
+            required
+            defaultValue={today()}
+          />
+        </Field>
+      </div>
+      {crossing && (
+        <Field
+          label="Budget category"
+          hint={
+            contribution
+              ? 'This contribution leaves your budget. Choose the category that funds it.'
+              : 'Return money to a category, or leave it ready to assign.'
+          }
+        >
+          <select
+            key={contribution ? 'contribution' : 'withdrawal'}
+            name="categoryId"
+            required={contribution}
+            defaultValue=""
+          >
+            {contribution && (
+              <option value="" disabled>
+                Choose a category
+              </option>
+            )}
+            <CategoryOptions data={data} includeReady={!contribution} />
+          </select>
+        </Field>
+      )}
+      <Field label="Memo (optional)">
+        <input name="memo" maxLength={2000} />
+      </Field>
+      <p className="muted small">
+        Transfers update both accounts and don’t change net worth. Contributions to investments
+        reduce the chosen budget category. Money returned from investments enters your budget.
+      </p>
+    </Form>
   );
 }
